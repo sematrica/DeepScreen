@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Image Analysis Toolkit</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@v3.0.3/dist/tesseract.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; }
+        .section { border: 1px solid #ddd; padding: 15px; margin-bottom: 20px; border-radius: 5px; }
+        .preview-container { position: relative; display: inline-block; }
+        #imagePreview { max-width: 600px; max-height: 400px; }
+        #overlayCanvas { position: absolute; left: 0; top: 0; pointer-events: none; }
+        button { background: #4CAF50; color: white; border: none; padding: 8px 15px; cursor: pointer; margin: 5px 0; }
+        button:hover { background: #45a049; }
+        .color-swatch { display: inline-block; width: 20px; height: 20px; margin-right: 5px; }
+        #metaInfo { display: none; background: #f0f0f0; padding: 10px; margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <div class="section">
+        <h3>Upload Image</h3>
+        <input type="file" id="imageUpload" accept="image/*">
+    </div>
+
+    <div class="section">
+        <h3>Preview <small>(Hover to zoom)</small></h3>
+        <div class="preview-container">
+            <img id="imagePreview" src="#" alt="Preview">
+            <canvas id="overlayCanvas"></canvas>
+        </div>
+    </div>
+
+    <div class="section">
+        <h3>Color Extraction <button onclick="exportColors()">Export to XLSX</button></h3>
+        <canvas id="colorChart"></canvas>
+        <div id="colorList"></div>
+    </div>
+
+    <div class="section">
+        <h3>Object Detection <button onclick="detectObjects()">Run Detection</button></h3>
+        <div id="objectResults"></div>
+    </div>
+
+    <div class="section">
+        <h3>OCR <button onclick="runOCR()">Extract Text</button></h3>
+        <div id="ocrResults"></div>
+    </div>
+
+    <div class="section">
+        <button onclick="toggleMeta()">Meta Info</button>
+        <pre id="metaInfo">{
+    "tool_meta": {
+        "sections": [
+            { "name": "Upload", "purpose": "Image acquisition via file input" },
+            { "name": "Preview", "purpose": "Visual feedback with zoom capability" },
+            { "name": "Color Extraction", 
+              "process": "Canvas pixel analysis -> RGB/HEX conversion -> Chart.js visualization",
+              "export": "XLSX via SheetJS" },
+            { "name": "Object Detection",
+              "model": "COCO-SSD via TensorFlow.js",
+              "output": "Bounding boxes with confidence scores" },
+            { "name": "OCR",
+              "library": "Tesseract.js",
+              "capability": "Multi-language text extraction" }
+        ],
+        "dependencies": [
+            "TensorFlow.js 3.8.0",
+            "COCO-SSD 2.1.0",
+            "Tesseract.js 3.0.3",
+            "Chart.js 3.7.0",
+            "SheetJS 0.18.5"
+        ]
+    }
+}</pre>
+    </div>
+
+    <script>
+        let colorData = [];
+        let cocoModel = null;
+        let tesseractWorker = null;
+
+        document.getElementById('imageUpload').addEventListener('change', function(e) {
+            const reader = new FileReader();
+            reader.onload = function() {
+                document.getElementById('imagePreview').src = reader.result;
+                document.getElementById('overlayCanvas').width = 0;
+                document.getElementById('overlayCanvas').height = 0;
+            }
+            reader.readAsDataURL(e.target.files[0]);
+        });
+
+        async function extractColors() {
+            const img = document.getElementById('imagePreview');
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = img.naturalWidth;
+            canvas.height = img.naturalHeight;
+            ctx.drawImage(img, 0, 0);
+            
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+            const colorCounts = {};
+
+            for(let i = 0; i < imageData.length; i += 4) {
+                const rgb = `${imageData[i]},${imageData[i+1]},${imageData[i+2]}`;
+                colorCounts[rgb] = (colorCounts[rgb] || 0) + 1;
+            }
+
+            colorData = Object.entries(colorCounts).map(([rgb, count]) => ({
+                rgb,
+                hex: '#' + rgb.split(',').map(c => 
+                    parseInt(c).toString(16).padStart(2, '0')).join(''),
+                percentage: (count / (imageData.length/4) * 100).toFixed(2)
+            })).sort((a,b) => b.percentage - a.percentage);
+
+            renderChart();
+        }
+
+        function renderChart() {
+            const ctx = document.getElementById('colorChart').getContext('2d');
+            new Chart(ctx, {
+                type: 'pie',
+                data: {
+                    labels: colorData.map(c => c.hex),
+                    datasets: [{
+                        data: colorData.map(c => c.percentage),
+                        backgroundColor: colorData.map(c => c.hex)
+                    }]
+                }
+            });
+        }
+
+        async function detectObjects() {
+            if(!cocoModel) cocoModel = await cocoSsd.load();
+            const predictions = await cocoModel.detect(document.getElementById('imagePreview'));
+            
+            const canvas = document.getElementById('overlayCanvas');
+            canvas.width = document.getElementById('imagePreview').naturalWidth;
+            canvas.height = document.getElementById('imagePreview').naturalHeight;
+            const ctx = canvas.getContext('2d');
+            
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            predictions.forEach(prediction => {
+                ctx.strokeStyle = '#FF0000';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(...prediction.bbox);
+                ctx.fillStyle = '#FF0000';
+                ctx.fillText(`${prediction.class} (${Math.round(prediction.score * 100)}%)`, 
+                            prediction.bbox[0], prediction.bbox[1] > 10 ? prediction.bbox[1] - 5 : 10);
+            });
+        }
+
+        async function runOCR() {
+            if(!tesseractWorker) tesseractWorker = await Tesseract.createWorker();
+            const { data: { text } } = await tesseractWorker.recognize(document.getElementById('imagePreview'));
+            document.getElementById('ocrResults').innerText = text;
+        }
+
+        function exportColors() {
+            const ws = XLSX.utils.json_to_sheet(colorData);
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, ws, "Colors");
+            XLSX.writeFile(wb, 'color_data.xlsx');
+        }
+
+        function toggleMeta() {
+            document.getElementById('metaInfo').style.display = 
+                document.getElementById('metaInfo').style.display === 'block' ? 'none' : 'block';
+        }
+
+        document.getElementById('imagePreview').addEventListener('load', function() {
+            extractColors();
+            document.getElementById('overlayCanvas').width = this.naturalWidth;
+            document.getElementById('overlayCanvas').height = this.naturalHeight;
+        });
+    </script>
+</body>
+</html>
